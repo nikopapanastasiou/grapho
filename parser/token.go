@@ -55,6 +55,14 @@ const (
 	TEXT
 	BOOLKW
 	UUID
+	
+	// DML keywords
+	INSERT
+	UPDATE
+	DELETE
+	MATCH
+	WHERE
+	RETURN
 
 	// Symbols
 	LPAREN // (
@@ -167,6 +175,18 @@ func (tt TokenType) String() string {
 		return "BOOL"
 	case UUID:
 		return "UUID"
+	case INSERT:
+		return "INSERT"
+	case UPDATE:
+		return "UPDATE"
+	case DELETE:
+		return "DELETE"
+	case MATCH:
+		return "MATCH"
+	case WHERE:
+		return "WHERE"
+	case RETURN:
+		return "RETURN"
 	case LPAREN:
 		return "("
 	case RPAREN:

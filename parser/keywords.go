@@ -43,6 +43,14 @@ var keywords = map[string]TokenType{
 	"UUID":     UUID,
 	"TRUE":     BOOL,
 	"FALSE":    BOOL,
+	
+	// DML keywords
+	"INSERT":   INSERT,
+	"UPDATE":   UPDATE,
+	"DELETE":   DELETE,
+	"MATCH":    MATCH,
+	"WHERE":    WHERE,
+	"RETURN":   RETURN,
 }
 
 func LookupIdent(ident string) TokenType {

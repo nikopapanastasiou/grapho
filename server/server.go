@@ -19,6 +19,8 @@ type Server struct {
 	listener net.Listener
 	mu       sync.RWMutex
 	clients  map[net.Conn]bool
+	commitLog *CommitLog
+	replaying bool
 }
 
 // NewServer creates a new server instance
@@ -30,13 +32,41 @@ func NewServer(addr string, registry *catalog.Registry) *Server {
 	}
 }
 
+// AttachCommitLog associates a commit log with the server
+func (s *Server) AttachCommitLog(cl *CommitLog) {
+	s.commitLog = cl
+}
+
 // Start begins listening for connections
 func (s *Server) Start() error {
 	listener, err := net.Listen("tcp", s.addr)
 	if err != nil {
 		return fmt.Errorf("failed to listen on %s: %w", s.addr, err)
 	}
-	
+
+	// On startup, replay commit log if present
+	if s.commitLog != nil {
+		s.replaying = true
+		if err := s.commitLog.Replay(func(line string) error {
+			// Apply without emitting to any client and without re-appending
+			p := parser.NewParser(line)
+			stmts, errs := p.ParseScript()
+			if len(errs) > 0 {
+				// stop replay on parse error to avoid corrupting state
+				return fmt.Errorf("replay parse error: %v", errs)
+			}
+			for _, st := range stmts {
+				if err := s.executeStatement(nil, st); err != nil {
+					return fmt.Errorf("replay exec error: %w", err)
+				}
+			}
+			return nil
+		}); err != nil {
+			return fmt.Errorf("replay commit log failed: %w", err)
+		}
+		s.replaying = false
+	}
+
 	s.listener = listener
 	fmt.Printf("Server listening on %s\n", s.addr)
 	
@@ -164,6 +194,16 @@ func (s *Server) executeCommand(conn net.Conn, command string) {
 	}
 	
 	fmt.Fprintf(conn, "OK - %d statement(s) executed successfully\n\n", len(stmts))
+
+	// Append the original command to the commit log after successful execution
+	if s.commitLog != nil && !s.replaying {
+		// Ensure a trailing semicolon for readability
+		toAppend := strings.TrimSpace(command)
+		if !strings.HasSuffix(toAppend, ";") {
+			toAppend += ";"
+		}
+		_ = s.commitLog.Append(toAppend)
+	}
 }
 
 // executeStatement executes a single parsed statement
@@ -181,6 +221,20 @@ func (s *Server) executeStatement(conn net.Conn, stmt parser.Stmt) error {
 		return s.executeDropNode(st)
 	case *parser.DropEdgeStmt:
 		return s.executeDropEdge(st)
+	case *parser.InsertNodeStmt:
+		return s.executeInsertNode(conn, st)
+	case *parser.InsertEdgeStmt:
+		return s.executeInsertEdge(conn, st)
+	case *parser.UpdateNodeStmt:
+		return s.executeUpdateNode(conn, st)
+	case *parser.UpdateEdgeStmt:
+		return s.executeUpdateEdge(conn, st)
+	case *parser.DeleteNodeStmt:
+		return s.executeDeleteNode(conn, st)
+	case *parser.DeleteEdgeStmt:
+		return s.executeDeleteEdge(conn, st)
+	case *parser.MatchStmt:
+		return s.executeMatch(conn, st)
 	default:
 		return fmt.Errorf("unsupported statement type: %T", stmt)
 	}
@@ -458,4 +512,283 @@ func convertCardinality(c parser.Cardinality) catalog.Cardinality {
 	default:
 		return catalog.One // fallback
 	}
+}
+
+/* ---------------------- DML execution methods ---------------------- */
+
+// Simple in-memory data store for demonstration
+// In a real implementation, this would be a proper graph database
+type GraphData struct {
+	Nodes  map[string]map[string]interface{} // nodeType -> nodeID -> properties
+	Edges  map[string][]EdgeInstance         // edgeType -> list of edge instances
+	NextID int64                             // Simple ID generator
+}
+
+type EdgeInstance struct {
+	ID         string
+	FromNodeID string
+	ToNodeID   string
+	Properties map[string]interface{}
+}
+
+var graphData = &GraphData{
+	Nodes:  make(map[string]map[string]interface{}),
+	Edges:  make(map[string][]EdgeInstance),
+	NextID: 1,
+}
+
+// executeInsertNode executes an INSERT NODE statement
+func (s *Server) executeInsertNode(conn net.Conn, stmt *parser.InsertNodeStmt) error {
+    // Validate node type exists in catalog
+    cat := s.registry.Current()
+    nodeType, exists := cat.Nodes[stmt.NodeType]
+    if !exists {
+        return fmt.Errorf("node type '%s' does not exist", stmt.NodeType)
+    }
+    // Generate new node ID
+    nodeID := fmt.Sprintf("%d", graphData.NextID)
+    graphData.NextID++
+    // Initialize storage for this node type
+    if graphData.Nodes[stmt.NodeType] == nil {
+        graphData.Nodes[stmt.NodeType] = make(map[string]interface{})
+    }
+    // Build properties
+    properties := make(map[string]interface{})
+    for _, prop := range stmt.Properties {
+        switch prop.Value.Kind {
+        case parser.LitString:
+            properties[prop.Name] = prop.Value.Text
+        case parser.LitNumber:
+            properties[prop.Name] = prop.Value.Text
+        case parser.LitBool:
+            properties[prop.Name] = prop.Value.Text == "true"
+        case parser.LitNull:
+            properties[prop.Name] = nil
+        }
+    }
+    // Simple required field check
+    for fieldName, fieldSpec := range nodeType.Fields {
+        if fieldSpec.NotNull {
+            if _, ok := properties[fieldName]; !ok {
+                return fmt.Errorf("required field '%s' is missing", fieldName)
+            }
+        }
+    }
+    // Add synthetic ID
+    properties["_id"] = nodeID
+    // Store the node
+    graphData.Nodes[stmt.NodeType][nodeID] = properties
+    if conn != nil {
+        fmt.Fprintf(conn, "Node inserted with ID: %s\n", nodeID)
+    }
+    return nil
+}
+
+// executeInsertEdge executes an INSERT EDGE statement
+func (s *Server) executeInsertEdge(conn net.Conn, stmt *parser.InsertEdgeStmt) error {
+    // Validate edge type exists
+    cat := s.registry.Current()
+    edgeType, exists := cat.Edges[stmt.EdgeType]
+    if !exists {
+        return fmt.Errorf("edge type '%s' does not exist", stmt.EdgeType)
+    }
+    // Resolve endpoints
+    fromNodeID, err := s.findNodeID(stmt.FromNode)
+    if err != nil { return fmt.Errorf("FROM node not found: %v", err) }
+    toNodeID, err := s.findNodeID(stmt.ToNode)
+    if err != nil { return fmt.Errorf("TO node not found: %v", err) }
+    if stmt.FromNode.NodeType != edgeType.From.Label {
+        return fmt.Errorf("FROM node type '%s' does not match edge FROM type '%s'", stmt.FromNode.NodeType, edgeType.From.Label)
+    }
+    if stmt.ToNode.NodeType != edgeType.To.Label {
+        return fmt.Errorf("TO node type '%s' does not match edge TO type '%s'", stmt.ToNode.NodeType, edgeType.To.Label)
+    }
+    // Generate ID
+    edgeID := fmt.Sprintf("edge_%d", graphData.NextID)
+    graphData.NextID++
+    // Properties
+    properties := make(map[string]interface{})
+    for _, prop := range stmt.Properties {
+        switch prop.Value.Kind {
+        case parser.LitString:
+            properties[prop.Name] = prop.Value.Text
+        case parser.LitNumber:
+            properties[prop.Name] = prop.Value.Text
+        case parser.LitBool:
+            properties[prop.Name] = prop.Value.Text == "true"
+        case parser.LitNull:
+            properties[prop.Name] = nil
+        }
+    }
+    edge := EdgeInstance{ ID: edgeID, FromNodeID: fromNodeID, ToNodeID: toNodeID, Properties: properties }
+    graphData.Edges[stmt.EdgeType] = append(graphData.Edges[stmt.EdgeType], edge)
+    if conn != nil {
+        fmt.Fprintf(conn, "Edge inserted with ID: %s\n", edgeID)
+    }
+    return nil
+}
+
+// executeUpdateNode executes an UPDATE NODE statement
+func (s *Server) executeUpdateNode(conn net.Conn, stmt *parser.UpdateNodeStmt) error {
+    nodes := graphData.Nodes[stmt.NodeType]
+    if nodes == nil { return fmt.Errorf("no nodes of type '%s' found", stmt.NodeType) }
+    updated := 0
+    for _, nodeProps := range nodes {
+        if s.matchesConditions(nodeProps, stmt.Where) {
+            for _, setProp := range stmt.Set {
+                switch setProp.Value.Kind {
+                case parser.LitString:
+                    nodeProps.(map[string]interface{})[setProp.Name] = setProp.Value.Text
+                case parser.LitNumber:
+                    nodeProps.(map[string]interface{})[setProp.Name] = setProp.Value.Text
+                case parser.LitBool:
+                    nodeProps.(map[string]interface{})[setProp.Name] = setProp.Value.Text == "true"
+                case parser.LitNull:
+                    nodeProps.(map[string]interface{})[setProp.Name] = nil
+                }
+            }
+            updated++
+        }
+    }
+    if conn != nil { fmt.Fprintf(conn, "Updated %d node(s)\n", updated) }
+    return nil
+}
+
+// executeUpdateEdge executes an UPDATE EDGE statement
+func (s *Server) executeUpdateEdge(conn net.Conn, stmt *parser.UpdateEdgeStmt) error {
+    edges := graphData.Edges[stmt.EdgeType]
+    updated := 0
+    for i := range edges {
+        if s.matchesConditions(edges[i].Properties, stmt.Where) {
+            for _, setProp := range stmt.Set {
+                switch setProp.Value.Kind {
+                case parser.LitString:
+                    edges[i].Properties[setProp.Name] = setProp.Value.Text
+                case parser.LitNumber:
+                    edges[i].Properties[setProp.Name] = setProp.Value.Text
+                case parser.LitBool:
+                    edges[i].Properties[setProp.Name] = setProp.Value.Text == "true"
+                case parser.LitNull:
+                    edges[i].Properties[setProp.Name] = nil
+                }
+            }
+            updated++
+        }
+    }
+    if conn != nil { fmt.Fprintf(conn, "Updated %d edge(s)\n", updated) }
+    return nil
+}
+
+// executeDeleteNode executes a DELETE NODE statement
+func (s *Server) executeDeleteNode(conn net.Conn, stmt *parser.DeleteNodeStmt) error {
+    nodes := graphData.Nodes[stmt.NodeType]
+    if nodes == nil { return fmt.Errorf("no nodes of type '%s' found", stmt.NodeType) }
+    deleted := 0
+    for nodeID, nodeProps := range nodes {
+        if s.matchesConditions(nodeProps, stmt.Where) {
+            delete(nodes, nodeID)
+            deleted++
+        }
+    }
+    if conn != nil { fmt.Fprintf(conn, "Deleted %d node(s)\n", deleted) }
+    return nil
+}
+
+// executeDeleteEdge executes a DELETE EDGE statement
+func (s *Server) executeDeleteEdge(conn net.Conn, stmt *parser.DeleteEdgeStmt) error {
+    edges := graphData.Edges[stmt.EdgeType]
+    var remaining []EdgeInstance
+    deleted := 0
+    for _, edge := range edges {
+        if s.matchesConditions(edge.Properties, stmt.Where) {
+            deleted++
+        } else {
+            remaining = append(remaining, edge)
+        }
+    }
+    graphData.Edges[stmt.EdgeType] = remaining
+    if conn != nil { fmt.Fprintf(conn, "Deleted %d edge(s)\n", deleted) }
+    return nil
+}
+
+// executeMatch executes a MATCH statement for querying
+func (s *Server) executeMatch(conn net.Conn, stmt *parser.MatchStmt) error {
+    if conn != nil { fmt.Fprintf(conn, "MATCH Results:\n") }
+    for _, element := range stmt.Pattern {
+        if !element.IsEdge {
+            nodes := graphData.Nodes[element.Type]
+            if nodes != nil {
+                if conn != nil { fmt.Fprintf(conn, "\nNodes of type '%s':\n", element.Type) }
+                for nodeID, props := range nodes {
+                    if len(stmt.Where) == 0 || s.matchesConditions(props, stmt.Where) {
+                        if conn != nil { fmt.Fprintf(conn, "  ID: %s, Properties: %v\n", nodeID, props) }
+                    }
+                }
+            }
+        }
+    }
+    return nil
+}
+
+/* ---------------------- Helper methods ---------------------- */
+
+// findNodeID finds a node ID based on NodeRef (by direct ID or property match)
+func (s *Server) findNodeID(nodeRef *parser.NodeRef) (string, error) {
+    nodes := graphData.Nodes[nodeRef.NodeType]
+    if nodes == nil {
+        return "", fmt.Errorf("no nodes of type '%s' found", nodeRef.NodeType)
+    }
+    // Direct ID reference
+    if nodeRef.ID != nil {
+        nodeID := nodeRef.ID.Text
+        if _, exists := nodes[nodeID]; exists {
+            return nodeID, nil
+        }
+        return "", fmt.Errorf("node with ID '%s' not found", nodeID)
+    }
+    // Property-based search
+    for nodeID, nodeProps := range nodes {
+        if s.matchesConditions(nodeProps, nodeRef.Properties) {
+            return nodeID, nil
+        }
+    }
+    return "", fmt.Errorf("no matching node found")
+}
+
+// matchesConditions checks if properties match the given conditions
+func (s *Server) matchesConditions(properties interface{}, conditions []parser.Property) bool {
+	if len(conditions) == 0 {
+		return true
+	}
+	
+	props, ok := properties.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	
+	for _, condition := range conditions {
+		propValue, exists := props[condition.Name]
+		if !exists {
+			return false
+		}
+		
+		// Simple equality check
+		var expectedValue interface{}
+		switch condition.Value.Kind {
+		case parser.LitString:
+			expectedValue = condition.Value.Text
+		case parser.LitNumber:
+			expectedValue = condition.Value.Text
+		case parser.LitBool:
+			expectedValue = condition.Value.Text == "true"
+		case parser.LitNull:
+			expectedValue = nil
+		}
+		
+		if propValue != expectedValue {
+			return false
+		}
+	}
+	
+	return true
 }

@@ -90,6 +90,14 @@ func (p *Parser) parseStmt() Stmt {
 		return p.parseAlter()
 	case DROP:
 		return p.parseDrop()
+	case INSERT:
+		return p.parseInsert()
+	case UPDATE:
+		return p.parseUpdate()
+	case DELETE:
+		return p.parseDelete()
+	case MATCH:
+		return p.parseMatch()
 	default:
 		t := p.tok
 		p.errf(t.Line, t.Column, "unexpected token %v at start of statement", t.Type)
@@ -466,4 +474,308 @@ func (p *Parser) parseDropEdge(line, col int) *DropEdgeStmt {
 		Line: line,
 		Col:  col,
 	}
+}
+
+/* ---------------------- DML statements ---------------------- */
+
+// parseInsert handles INSERT NODE and INSERT EDGE statements
+func (p *Parser) parseInsert() Stmt {
+	line, col := p.tok.Line, p.tok.Column
+	p.expect(INSERT)
+
+	switch p.tok.Type {
+	case NODE:
+		return p.parseInsertNode(line, col)
+	case EDGE:
+		return p.parseInsertEdge(line, col)
+	default:
+		p.errf(p.tok.Line, p.tok.Column, "expected NODE or EDGE after INSERT, found %v", p.tok.Type)
+		return nil
+	}
+}
+
+// parseInsertNode handles INSERT NODE statements
+func (p *Parser) parseInsertNode(line, col int) *InsertNodeStmt {
+	p.expect(NODE)
+
+	// Parse node type
+	nodeType := p.expect(IDENT).Lit
+
+	// Parse optional properties
+	var properties []Property
+	if p.match(LPAREN) {
+		properties = p.parsePropertyList()
+		p.expect(RPAREN)
+	}
+
+	return &InsertNodeStmt{
+		NodeType:   nodeType,
+		Properties: properties,
+		Line:       line,
+		Col:        col,
+	}
+}
+
+// parseInsertEdge handles INSERT EDGE statements
+func (p *Parser) parseInsertEdge(line, col int) *InsertEdgeStmt {
+	p.expect(EDGE)
+
+	// Parse edge type
+	edgeType := p.expect(IDENT).Lit
+
+	// Parse FROM clause
+	p.expect(FROM)
+	fromNode := p.parseNodeRef()
+
+	// Parse TO clause
+	p.expect(TO)
+	toNode := p.parseNodeRef()
+
+	// Parse optional properties
+	var properties []Property
+	if p.match(LPAREN) {
+		properties = p.parsePropertyList()
+		p.expect(RPAREN)
+	}
+
+	return &InsertEdgeStmt{
+		EdgeType:   edgeType,
+		FromNode:   fromNode,
+		ToNode:     toNode,
+		Properties: properties,
+		Line:       line,
+		Col:        col,
+	}
+}
+
+// parseUpdate handles UPDATE NODE and UPDATE EDGE statements
+func (p *Parser) parseUpdate() Stmt {
+	line, col := p.tok.Line, p.tok.Column
+	p.expect(UPDATE)
+
+	switch p.tok.Type {
+	case NODE:
+		return p.parseUpdateNode(line, col)
+	case EDGE:
+		return p.parseUpdateEdge(line, col)
+	default:
+		p.errf(p.tok.Line, p.tok.Column, "expected NODE or EDGE after UPDATE, found %v", p.tok.Type)
+		return nil
+	}
+}
+
+// parseUpdateNode handles UPDATE NODE statements
+func (p *Parser) parseUpdateNode(line, col int) *UpdateNodeStmt {
+	p.expect(NODE)
+
+	// Parse node type
+	nodeType := p.expect(IDENT).Lit
+
+	// Parse SET clause
+	p.expect(SET)
+	setProps := p.parsePropertyList()
+
+	// Parse optional WHERE clause
+	var whereProps []Property
+	if p.match(WHERE) {
+		whereProps = p.parsePropertyList()
+	}
+
+	return &UpdateNodeStmt{
+		NodeType: nodeType,
+		Set:      setProps,
+		Where:    whereProps,
+		Line:     line,
+		Col:      col,
+	}
+}
+
+// parseUpdateEdge handles UPDATE EDGE statements
+func (p *Parser) parseUpdateEdge(line, col int) *UpdateEdgeStmt {
+	p.expect(EDGE)
+
+	// Parse edge type
+	edgeType := p.expect(IDENT).Lit
+
+	// Parse SET clause
+	p.expect(SET)
+	setProps := p.parsePropertyList()
+
+	// Parse optional WHERE clause
+	var whereProps []Property
+	if p.match(WHERE) {
+		whereProps = p.parsePropertyList()
+	}
+
+	return &UpdateEdgeStmt{
+		EdgeType: edgeType,
+		Set:      setProps,
+		Where:    whereProps,
+		Line:     line,
+		Col:      col,
+	}
+}
+
+// parseDelete handles DELETE NODE and DELETE EDGE statements
+func (p *Parser) parseDelete() Stmt {
+	line, col := p.tok.Line, p.tok.Column
+	p.expect(DELETE)
+
+	switch p.tok.Type {
+	case NODE:
+		return p.parseDeleteNode(line, col)
+	case EDGE:
+		return p.parseDeleteEdge(line, col)
+	default:
+		p.errf(p.tok.Line, p.tok.Column, "expected NODE or EDGE after DELETE, found %v", p.tok.Type)
+		return nil
+	}
+}
+
+// parseDeleteNode handles DELETE NODE statements
+func (p *Parser) parseDeleteNode(line, col int) *DeleteNodeStmt {
+	p.expect(NODE)
+
+	// Parse node type
+	nodeType := p.expect(IDENT).Lit
+
+	// Parse WHERE clause
+	p.expect(WHERE)
+	whereProps := p.parsePropertyList()
+
+	return &DeleteNodeStmt{
+		NodeType: nodeType,
+		Where:    whereProps,
+		Line:     line,
+		Col:      col,
+	}
+}
+
+// parseDeleteEdge handles DELETE EDGE statements
+func (p *Parser) parseDeleteEdge(line, col int) *DeleteEdgeStmt {
+	p.expect(EDGE)
+
+	// Parse edge type
+	edgeType := p.expect(IDENT).Lit
+
+	// Parse WHERE clause
+	p.expect(WHERE)
+	whereProps := p.parsePropertyList()
+
+	return &DeleteEdgeStmt{
+		EdgeType: edgeType,
+		Where:    whereProps,
+		Line:     line,
+		Col:      col,
+	}
+}
+
+// parseMatch handles MATCH statements for querying
+func (p *Parser) parseMatch() *MatchStmt {
+	line, col := p.tok.Line, p.tok.Column
+	p.expect(MATCH)
+
+	// Parse pattern elements
+	var pattern []MatchElement
+
+	// Simple pattern parsing - can be extended for more complex patterns
+	for p.tok.Type == IDENT {
+		element := MatchElement{
+			Type:   p.tok.Lit,
+			IsEdge: false, // Simplified - assume nodes for now
+			Line:   p.tok.Line,
+			Col:    p.tok.Column,
+		}
+		p.next()
+
+		// Optional alias
+		if p.tok.Type == IDENT {
+			element.Alias = p.tok.Lit
+			p.next()
+		}
+
+		pattern = append(pattern, element)
+
+		if !p.match(COMMA) {
+			break
+		}
+	}
+
+	// Parse optional WHERE clause
+	var whereProps []Property
+	if p.match(WHERE) {
+		whereProps = p.parsePropertyList()
+	}
+
+	// Parse RETURN clause
+	var returnFields []string
+	if p.match(RETURN) {
+		for {
+			returnFields = append(returnFields, p.expect(IDENT).Lit)
+			if !p.match(COMMA) {
+				break
+			}
+		}
+	}
+
+	return &MatchStmt{
+		Pattern: pattern,
+		Where:   whereProps,
+		Return:  returnFields,
+		Line:    line,
+		Col:     col,
+	}
+}
+
+/* ---------------------- Helper functions ---------------------- */
+
+// parsePropertyList parses a comma-separated list of property assignments
+func (p *Parser) parsePropertyList() []Property {
+	var properties []Property
+
+	for {
+		prop := Property{
+			Name: p.expect(IDENT).Lit,
+			Line: p.tok.Line,
+			Col:  p.tok.Column,
+		}
+
+		p.expect(COLON)
+		lit := p.parseLiteral()
+		prop.Value = &lit
+
+		properties = append(properties, prop)
+
+		if !p.match(COMMA) {
+			break
+		}
+	}
+
+	return properties
+}
+
+// parseNodeRef parses a node reference (by ID or properties)
+func (p *Parser) parseNodeRef() *NodeRef {
+	nodeRef := &NodeRef{
+		Line: p.tok.Line,
+		Col:  p.tok.Column,
+	}
+
+	// Parse node type
+	nodeRef.NodeType = p.expect(IDENT).Lit
+
+	// Parse reference - either direct ID or property match
+	if p.match(LPAREN) {
+		if p.tok.Type == NUMBER || p.tok.Type == STRING {
+			// Direct ID reference
+			lit := p.parseLiteral()
+			nodeRef.ID = &lit
+		} else {
+			// Property-based match
+			nodeRef.Properties = p.parsePropertyList()
+		}
+		p.expect(RPAREN)
+	}
+
+	return nodeRef
 }
