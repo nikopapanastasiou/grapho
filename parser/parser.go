@@ -86,6 +86,10 @@ func (p *Parser) parseStmt() Stmt {
 	switch p.tok.Type {
 	case CREATE:
 		return p.parseCreate()
+	case ALTER:
+		return p.parseAlter()
+	case DROP:
+		return p.parseDrop()
 	default:
 		t := p.tok
 		p.errf(t.Line, t.Column, "unexpected token %v at start of statement", t.Type)
@@ -311,4 +315,155 @@ func (p *Parser) parseEndpoint() Endpoint {
 		ep.Card = CardMany
 	}
 	return ep
+}
+
+/* ---------------------- ALTER statements ---------------------- */
+
+func (p *Parser) parseAlter() Stmt {
+	alterTok := p.tok
+	p.next()
+	switch p.tok.Type {
+	case NODE:
+		p.next()
+		return p.parseAlterNode(alterTok.Line, alterTok.Column)
+	case EDGE:
+		p.next()
+		return p.parseAlterEdge(alterTok.Line, alterTok.Column)
+	default:
+		t := p.tok
+		p.errf(t.Line, t.Column, "expected NODE or EDGE after ALTER")
+		return nil
+	}
+}
+
+func (p *Parser) parseAlterNode(line, col int) *AlterNodeStmt {
+	name := p.expect(IDENT)
+	stmt := &AlterNodeStmt{
+		Name: name.Lit,
+		Line: line,
+		Col:  col,
+	}
+
+	switch p.tok.Type {
+	case ADD:
+		p.next()
+		stmt.Action = AlterAddField
+		field := p.parseFieldDef()
+		stmt.Field = &field
+	case DROP:
+		p.next()
+		fieldName := p.expect(IDENT)
+		stmt.Action = AlterDropField
+		stmt.FieldName = fieldName.Lit
+	case MODIFY:
+		p.next()
+		stmt.Action = AlterModifyField
+		field := p.parseFieldDef()
+		stmt.Field = &field
+	case SET:
+		p.next()
+		p.expect(PRIMARY)
+		p.expect(KEY)
+		p.expect(LPAREN)
+
+		// Parse primary key field list
+		var pkFields []string
+		for {
+			fieldName := p.expect(IDENT)
+			pkFields = append(pkFields, fieldName.Lit)
+			if !p.match(COMMA) {
+				break
+			}
+		}
+		p.expect(RPAREN)
+
+		stmt.Action = AlterSetPrimaryKey
+		stmt.PkFields = pkFields
+	default:
+		t := p.tok
+		p.errf(t.Line, t.Column, "expected ADD, DROP, MODIFY, or SET after ALTER NODE")
+		return nil
+	}
+
+	return stmt
+}
+
+func (p *Parser) parseAlterEdge(line, col int) *AlterEdgeStmt {
+	name := p.expect(IDENT)
+	stmt := &AlterEdgeStmt{
+		Name: name.Lit,
+		Line: line,
+		Col:  col,
+	}
+
+	switch p.tok.Type {
+	case ADD:
+		p.next()
+		stmt.Action = AlterAddProp
+		prop := p.parseFieldDef()
+		stmt.Prop = &prop
+	case DROP:
+		p.next()
+		propName := p.expect(IDENT)
+		stmt.Action = AlterDropProp
+		stmt.PropName = propName.Lit
+	case MODIFY:
+		p.next()
+		stmt.Action = AlterModifyProp
+		prop := p.parseFieldDef()
+		stmt.Prop = &prop
+	case SET:
+		p.next()
+		p.expect(FROM)
+		from := p.parseEndpoint()
+		p.expect(TO)
+		to := p.parseEndpoint()
+
+		stmt.Action = AlterSetEndpoints
+		stmt.From = &from
+		stmt.To = &to
+	default:
+		t := p.tok
+		p.errf(t.Line, t.Column, "expected ADD, DROP, MODIFY, or SET after ALTER EDGE")
+		return nil
+	}
+
+	return stmt
+}
+
+/* ---------------------- DROP statements ---------------------- */
+
+func (p *Parser) parseDrop() Stmt {
+	dropTok := p.tok
+	p.next()
+	switch p.tok.Type {
+	case NODE:
+		p.next()
+		return p.parseDropNode(dropTok.Line, dropTok.Column)
+	case EDGE:
+		p.next()
+		return p.parseDropEdge(dropTok.Line, dropTok.Column)
+	default:
+		t := p.tok
+		p.errf(t.Line, t.Column, "expected NODE or EDGE after DROP")
+		return nil
+	}
+}
+
+func (p *Parser) parseDropNode(line, col int) *DropNodeStmt {
+	name := p.expect(IDENT)
+	return &DropNodeStmt{
+		Name: name.Lit,
+		Line: line,
+		Col:  col,
+	}
+}
+
+func (p *Parser) parseDropEdge(line, col int) *DropEdgeStmt {
+	name := p.expect(IDENT)
+	return &DropEdgeStmt{
+		Name: name.Lit,
+		Line: line,
+		Col:  col,
+	}
 }
