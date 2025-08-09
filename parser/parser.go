@@ -468,11 +468,12 @@ func (p *Parser) parseDropNode(line, col int) *DropNodeStmt {
 }
 
 func (p *Parser) parseDropEdge(line, col int) *DropEdgeStmt {
-	p.expect(IDENT) // edge name
-	name := p.tok.Lit
-	p.next()
-
-	return &DropEdgeStmt{Name: name, Line: line, Col: col}
+	name := p.expect(IDENT)
+	return &DropEdgeStmt{
+		Name: name.Lit,
+		Line: line,
+		Col:  col,
+	}
 }
 
 /* ---------------------- DML statements ---------------------- */
