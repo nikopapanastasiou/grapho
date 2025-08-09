@@ -83,3 +83,61 @@ type Literal struct {
 	Text      string // original text (already unescaped for strings)
 	Line, Col int
 }
+
+// ALTER statement types
+
+type AlterAction int
+
+const (
+	AlterAddField AlterAction = iota
+	AlterDropField
+	AlterModifyField
+	AlterSetPrimaryKey
+	AlterAddProp
+	AlterDropProp
+	AlterModifyProp
+	AlterSetEndpoints
+)
+
+type AlterNodeStmt struct {
+	Name      string
+	Action    AlterAction
+	Field     *FieldDef // for add/modify field
+	FieldName string    // for drop field
+	PkFields  []string  // for set primary key
+	Line, Col int
+}
+
+func (*AlterNodeStmt) node()             {}
+func (s *AlterNodeStmt) Pos() (int, int) { return s.Line, s.Col }
+
+type AlterEdgeStmt struct {
+	Name      string
+	Action    AlterAction
+	Prop      *FieldDef  // for add/modify prop
+	PropName  string     // for drop prop
+	From      *Endpoint  // for set endpoints
+	To        *Endpoint  // for set endpoints
+	Line, Col int
+}
+
+func (*AlterEdgeStmt) node()             {}
+func (s *AlterEdgeStmt) Pos() (int, int) { return s.Line, s.Col }
+
+// DROP statement types
+
+type DropNodeStmt struct {
+	Name      string
+	Line, Col int
+}
+
+func (*DropNodeStmt) node()             {}
+func (s *DropNodeStmt) Pos() (int, int) { return s.Line, s.Col }
+
+type DropEdgeStmt struct {
+	Name      string
+	Line, Col int
+}
+
+func (*DropEdgeStmt) node()             {}
+func (s *DropEdgeStmt) Pos() (int, int) { return s.Line, s.Col }

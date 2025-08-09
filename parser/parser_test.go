@@ -1,6 +1,9 @@
 package parser
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func TestParseCreateNode(t *testing.T) {
 	src := `
@@ -153,7 +156,7 @@ func TestParseFieldOptions(t *testing.T) {
 }
 
 func TestTrailingCommasAndEmptyFields(t *testing.T) {
-    src := `
+	src := `
 CREATE NODE A();
 CREATE NODE B(
   x: int,
@@ -229,5 +232,281 @@ func TestUnexpectedStartTokenRecovery(t *testing.T) {
 	}
 	if len(stmts) != 1 {
 		t.Fatalf("should recover and parse following statement")
+	}
+}
+
+func TestAlterNodeAddField(t *testing.T) {
+	src := `ALTER NODE Person ADD email:string unique not null default 'none';`
+	p := NewParser(src)
+	stmts, errs := p.ParseScript()
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	if len(stmts) != 1 {
+		t.Fatalf("expected 1 statement, got %d", len(stmts))
+	}
+
+	stmt, ok := stmts[0].(*AlterNodeStmt)
+	if !ok {
+		t.Fatalf("expected AlterNodeStmt, got %T", stmts[0])
+	}
+	if stmt.Name != "Person" {
+		t.Errorf("expected name Person, got %s", stmt.Name)
+	}
+	if stmt.Action != AlterAddField {
+		t.Errorf("expected AlterAddField, got %v", stmt.Action)
+	}
+	if stmt.Field == nil {
+		t.Fatal("expected field definition")
+	}
+	if stmt.Field.Name != "email" {
+		t.Errorf("expected field name email, got %s", stmt.Field.Name)
+	}
+	if stmt.Field.Type.Base != BaseString {
+		t.Errorf("expected string type, got %v", stmt.Field.Type.Base)
+	}
+	if !stmt.Field.Unique {
+		t.Error("expected unique field")
+	}
+	if !stmt.Field.NotNull {
+		t.Error("expected not null field")
+	}
+	if stmt.Field.Default == nil || stmt.Field.Default.Text != "none" {
+		t.Error("expected default value 'none'")
+	}
+}
+
+func TestAlterNodeDropField(t *testing.T) {
+	src := `ALTER NODE Person DROP email;`
+	p := NewParser(src)
+	stmts, errs := p.ParseScript()
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+
+	stmt := stmts[0].(*AlterNodeStmt)
+	if stmt.Action != AlterDropField {
+		t.Errorf("expected AlterDropField, got %v", stmt.Action)
+	}
+	if stmt.FieldName != "email" {
+		t.Errorf("expected field name email, got %s", stmt.FieldName)
+	}
+}
+
+func TestAlterNodeModifyField(t *testing.T) {
+	src := `ALTER NODE Person MODIFY email:text not null;`
+	p := NewParser(src)
+	stmts, errs := p.ParseScript()
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+
+	stmt := stmts[0].(*AlterNodeStmt)
+	if stmt.Action != AlterModifyField {
+		t.Errorf("expected AlterModifyField, got %v", stmt.Action)
+	}
+	if stmt.Field.Name != "email" {
+		t.Errorf("expected field name email, got %s", stmt.Field.Name)
+	}
+	if stmt.Field.Type.Base != BaseText {
+		t.Errorf("expected text type, got %v", stmt.Field.Type.Base)
+	}
+}
+
+func TestAlterNodeSetPrimaryKey(t *testing.T) {
+	src := `ALTER NODE Person SET PRIMARY KEY (id, email);`
+	p := NewParser(src)
+	stmts, errs := p.ParseScript()
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+
+	stmt := stmts[0].(*AlterNodeStmt)
+	if stmt.Action != AlterSetPrimaryKey {
+		t.Errorf("expected AlterSetPrimaryKey, got %v", stmt.Action)
+	}
+	expectedPk := []string{"id", "email"}
+	if len(stmt.PkFields) != len(expectedPk) {
+		t.Fatalf("expected %d pk fields, got %d", len(expectedPk), len(stmt.PkFields))
+	}
+	for i, field := range expectedPk {
+		if stmt.PkFields[i] != field {
+			t.Errorf("expected pk field %s, got %s", field, stmt.PkFields[i])
+		}
+	}
+}
+
+func TestAlterEdgeAddProp(t *testing.T) {
+	src := `ALTER EDGE Knows ADD weight:float default 1.0;`
+	p := NewParser(src)
+	stmts, errs := p.ParseScript()
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+
+	stmt := stmts[0].(*AlterEdgeStmt)
+	if stmt.Name != "Knows" {
+		t.Errorf("expected name Knows, got %s", stmt.Name)
+	}
+	if stmt.Action != AlterAddProp {
+		t.Errorf("expected AlterAddProp, got %v", stmt.Action)
+	}
+	if stmt.Prop.Name != "weight" {
+		t.Errorf("expected prop name weight, got %s", stmt.Prop.Name)
+	}
+	if stmt.Prop.Type.Base != BaseFloat {
+		t.Errorf("expected float type, got %v", stmt.Prop.Type.Base)
+	}
+}
+
+func TestAlterEdgeDropProp(t *testing.T) {
+	src := `ALTER EDGE Knows DROP weight;`
+	p := NewParser(src)
+	stmts, errs := p.ParseScript()
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+
+	stmt := stmts[0].(*AlterEdgeStmt)
+	if stmt.Action != AlterDropProp {
+		t.Errorf("expected AlterDropProp, got %v", stmt.Action)
+	}
+	if stmt.PropName != "weight" {
+		t.Errorf("expected prop name weight, got %s", stmt.PropName)
+	}
+}
+
+func TestAlterEdgeSetEndpoints(t *testing.T) {
+	src := `ALTER EDGE Knows SET FROM Person many TO Company one;`
+	p := NewParser(src)
+	stmts, errs := p.ParseScript()
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+
+	stmt := stmts[0].(*AlterEdgeStmt)
+	if stmt.Action != AlterSetEndpoints {
+		t.Errorf("expected AlterSetEndpoints, got %v", stmt.Action)
+	}
+	if stmt.From.Label != "Person" || stmt.From.Card != CardMany {
+		t.Errorf("expected from Person many, got %s %v", stmt.From.Label, stmt.From.Card)
+	}
+	if stmt.To.Label != "Company" || stmt.To.Card != CardOne {
+		t.Errorf("expected to Company one, got %s %v", stmt.To.Label, stmt.To.Card)
+	}
+}
+
+func TestAlterErrorCases(t *testing.T) {
+	tests := []struct {
+		name string
+		src  string
+	}{
+		{"missing node/edge", "ALTER FOO;"},
+		{"missing action", "ALTER NODE Person;"},
+		{"invalid action", "ALTER NODE Person INVALID;"},
+		{"missing field name for drop", "ALTER NODE Person DROP;"},
+		{"missing primary key fields", "ALTER NODE Person SET PRIMARY KEY;"},
+		{"missing edge action", "ALTER EDGE Knows;"},
+		{"missing prop name for drop", "ALTER EDGE Knows DROP;"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := NewParser(tt.src)
+			_, errs := p.ParseScript()
+			if len(errs) == 0 {
+				t.Errorf("expected errors for %s", tt.src)
+			}
+		})
+	}
+}
+
+func TestDropNode(t *testing.T) {
+	src := `DROP NODE Person;`
+	p := NewParser(src)
+	stmts, errs := p.ParseScript()
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	if len(stmts) != 1 {
+		t.Fatalf("expected 1 statement, got %d", len(stmts))
+	}
+
+	stmt, ok := stmts[0].(*DropNodeStmt)
+	if !ok {
+		t.Fatalf("expected DropNodeStmt, got %T", stmts[0])
+	}
+	if stmt.Name != "Person" {
+		t.Errorf("expected name Person, got %s", stmt.Name)
+	}
+}
+
+func TestDropEdge(t *testing.T) {
+	src := `DROP EDGE Knows;`
+	p := NewParser(src)
+	stmts, errs := p.ParseScript()
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	if len(stmts) != 1 {
+		t.Fatalf("expected 1 statement, got %d", len(stmts))
+	}
+
+	stmt, ok := stmts[0].(*DropEdgeStmt)
+	if !ok {
+		t.Fatalf("expected DropEdgeStmt, got %T", stmts[0])
+	}
+	if stmt.Name != "Knows" {
+		t.Errorf("expected name Knows, got %s", stmt.Name)
+	}
+}
+
+func TestDropErrorCases(t *testing.T) {
+	tests := []struct {
+		name string
+		src  string
+	}{
+		{"missing node/edge", "DROP FOO;"},
+		{"missing name", "DROP NODE;"},
+		{"missing edge name", "DROP EDGE;"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := NewParser(tt.src)
+			_, errs := p.ParseScript()
+			if len(errs) == 0 {
+				t.Errorf("expected errors for %s", tt.src)
+			}
+		})
+	}
+}
+
+func TestMixedStatements(t *testing.T) {
+	src := `
+		CREATE NODE Person(id:int PRIMARY KEY, name:string);
+		CREATE EDGE Knows (FROM Person ONE, TO Person MANY);
+		ALTER NODE Person ADD email:string;
+		ALTER EDGE Knows ADD weight:float;
+		DROP EDGE Knows;
+		DROP NODE Person;
+	`
+	p := NewParser(src)
+	stmts, errs := p.ParseScript()
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	if len(stmts) != 6 {
+		t.Fatalf("expected 6 statements, got %d", len(stmts))
+	}
+
+	// Verify statement types
+	expectedTypes := []string{"CreateNodeStmt", "CreateEdgeStmt", "AlterNodeStmt", "AlterEdgeStmt", "DropEdgeStmt", "DropNodeStmt"}
+	for i, stmt := range stmts {
+		stmtType := fmt.Sprintf("%T", stmt)
+		stmtType = stmtType[8:] // Remove "parser.*" prefix
+		if stmtType != expectedTypes[i] {
+			t.Errorf("statement %d: expected %s, got %s", i, expectedTypes[i], stmtType)
+		}
 	}
 }
