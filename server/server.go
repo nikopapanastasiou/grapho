@@ -185,25 +185,34 @@ func (s *Server) executeCommand(conn net.Conn, command string) {
 		return
 	}
 	
-	// Execute each statement
-	for i, stmt := range stmts {
-		if err := s.executeStatement(conn, stmt); err != nil {
-			fmt.Fprintf(conn, "Error executing statement %d: %s\n", i+1, err.Error())
-			return
-		}
-	}
-	
-	fmt.Fprintf(conn, "OK - %d statement(s) executed successfully\n\n", len(stmts))
+    // Execute each statement and track whether any mutates state
+    mutated := false
+    for i, stmt := range stmts {
+        if err := s.executeStatement(conn, stmt); err != nil {
+            fmt.Fprintf(conn, "Error executing statement %d: %s\n", i+1, err.Error())
+            return
+        }
+        switch stmt.(type) {
+        case *parser.CreateNodeStmt, *parser.CreateEdgeStmt,
+            *parser.AlterNodeStmt, *parser.AlterEdgeStmt,
+            *parser.DropNodeStmt, *parser.DropEdgeStmt,
+            *parser.InsertNodeStmt, *parser.InsertEdgeStmt,
+            *parser.UpdateNodeStmt, *parser.UpdateEdgeStmt,
+            *parser.DeleteNodeStmt, *parser.DeleteEdgeStmt:
+            mutated = true
+        }
+    }
+    
+    fmt.Fprintf(conn, "OK - %d statement(s) executed successfully\n\n", len(stmts))
 
-	// Append the original command to the commit log after successful execution
-	if s.commitLog != nil && !s.replaying {
-		// Ensure a trailing semicolon for readability
-		toAppend := strings.TrimSpace(command)
-		if !strings.HasSuffix(toAppend, ";") {
-			toAppend += ";"
-		}
-		_ = s.commitLog.Append(toAppend)
-	}
+    // Append the original command to the commit log only if there was a mutation
+    if mutated && s.commitLog != nil && !s.replaying {
+        toAppend := strings.TrimSpace(command)
+        if !strings.HasSuffix(toAppend, ";") {
+            toAppend += ";"
+        }
+        _ = s.commitLog.Append(toAppend)
+    }
 }
 
 // executeStatement executes a single parsed statement
