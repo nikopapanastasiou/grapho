@@ -3,17 +3,17 @@
 
 In-memory graph DB written in Go.
 
+The name comes from the Greek γράφω (grapho), meaning "to write," since it's fit for use only as a write-only database.
+
 ## Playing around
 
 Starting the server:
 ```bash
-cd server
 go run cmd/server
 ```
 
 Connecting to the server:
 ```bash
-cd client
 go run cmd/client
 ```
 
